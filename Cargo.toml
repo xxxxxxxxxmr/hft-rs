@@ -6,6 +6,7 @@ members = [
     "crates/exec_hyperliquid",
     "crates/spsc",
     "crates/metrics",
+    "crates/bins",
 ]
 
 resolver = "2"

@@ -1,0 +1,18 @@
+[package]
+name = "bin"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+engine_core = { path = "../engine_core" }
+ws_binance   = { path = "../ws_binance" }
+ws_hyperliquid = { path = "../ws_hyperliquid", optional = true }
+
+[[bin]]
+name = "poc_binance"
+path = "src/poc_binance.rs"
+
+[[bin]]
+name = "poc_hyper"
+path = "src/poc_hyper.rs"
