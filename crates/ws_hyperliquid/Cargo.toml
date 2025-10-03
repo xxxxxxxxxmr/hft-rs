@@ -4,3 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anyhow = "1"
+tungstenite = { version = "0.21", features = ["rustls-tls-native-roots"] }
+http = "0.2"
+simd-json = "0.13"
+arrayvec = "0.7"
+ahash = "0.8"
+hdrhistogram = "7"
+engine_core = { path = "../engine_core" }
+lexical-core = "0.8"
