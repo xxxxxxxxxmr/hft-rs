@@ -1,0 +1,11 @@
+[workspace]
+members = [
+    "crates/engine_core",
+    "crates/ws_binance",
+    "crates/ws_hyperliquid",
+    "crates/exec_hyperliquid",
+    "crates/spsc",
+    "crates/metrics",
+]
+
+resolver = "2"
