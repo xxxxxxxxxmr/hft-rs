@@ -1,4 +1,3 @@
-use tungstenite::client::connect_with_config;
 use anyhow::{anyhow, Context, Result};
 use arrayvec::ArrayVec;
 use ahash::AHashMap;
@@ -9,10 +8,71 @@ use std::io;
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
 use tungstenite::client::IntoClientRequest;
+use tungstenite::http;
 use tungstenite::protocol::WebSocketConfig;
 use tungstenite::{Message, WebSocket};
 use tungstenite::stream::MaybeTlsStream;
 use simd_json::prelude::{ValueAsContainer, ValueAsScalar};
+
+fn ws_connect_follow_redirects(
+    mut req: http::Request<()>,
+    ws_cfg: WebSocketConfig,
+    max_hops: usize,
+) -> Result<(WebSocket<MaybeTlsStream<TcpStream>>, http::Response<Option<Vec<u8>>>)> {
+    use http::StatusCode;
+    use tungstenite::client::connect_with_config as ws_connect;
+    use tungstenite::error::Error as WsError;
+
+    let mut hops = 0usize;
+    loop {
+        let cloned_req = req.clone();
+
+        match ws_connect(cloned_req, Some(ws_cfg), 0) {
+            Ok(ok) => return Ok(ok),
+            Err(WsError::Http(resp)) => {
+                let status = resp.status();
+                let is_redirect = matches!(
+                    status,
+                    StatusCode::MOVED_PERMANENTLY
+                        | StatusCode::FOUND
+                        | StatusCode::TEMPORARY_REDIRECT
+                        | StatusCode::PERMANENT_REDIRECT
+                );
+
+                if is_redirect && hops < max_hops {
+                    if let Some(loc) = resp.headers().get(http::header::LOCATION) {
+                        let loc = String::from_utf8_lossy(loc.as_bytes());
+                        let new_uri = loc.trim();
+
+                        let mut builder = http::Request::builder()
+                            .method("GET")
+                            .uri(new_uri)
+                            .header("Connection", "Upgrade")
+                            .header("Upgrade", "websocket")
+                            .header("Sec-WebSocket-Version", "13")
+                            .header("Sec-WebSocket-Key", "follow-redirect-key")
+                            .header("Origin", "https://binance.com");
+
+                        if let Some(host) = http::Uri::try_from(new_uri)
+                            .ok()
+                            .and_then(|uri| uri.authority().map(|a| a.to_string()))
+                        {
+                            builder = builder.header("Host", host);
+                        }
+
+                        req = builder
+                            .body(())
+                            .map_err(|e| anyhow!("{e}"))?;
+                        hops += 1;
+                        continue;
+                    }
+                }
+                return Err(anyhow!("WS HTTP error: {}", status));
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+}
 
 /// Fixed-cap working buffers for zero/low-alloc parsing on hot path.
 const MAX_LEVELS_PER_MSG: usize = 256;
@@ -143,16 +203,17 @@ impl BinanceHandler {
         }
     }
 
-    fn testnet_ws_url(&self) -> String {
-        // depth stream at ~100ms; we’ll use single-stream endpoint
+    fn ws_url(&self) -> String {
+        // Single-stream WS (prod)
+        // Examples: wss://stream.binance.com:9443/ws/btcusdt@depth@100ms
         let stream = format!("{}@depth@100ms", self.symbol.to_lowercase());
-        format!("wss://testnet.binance.com/ws/{}", stream)
+        format!("wss://stream.binance.com:9443/ws/{}", stream)
     }
 
     fn snapshot_url(&self) -> String {
         // 1000 levels snapshot to minimize early resyncs
         format!(
-            "https://testnet.binance.com/api/v3/depth?symbol={}&limit=1000",
+            "https://api.binance.com/api/v3/depth?symbol={}&limit=1000",
             self.symbol.to_uppercase()
         )
     }
@@ -161,16 +222,36 @@ impl BinanceHandler {
         if self.ws.is_some() { return Ok(()); }
 
         // 1) Connect WS with small read timeout and TCP_NODELAY
-        let url = self.testnet_ws_url();
+        let url = self.ws_url();
         let req = url.clone().into_client_request()?;
+
+        // Optional: add Origin header up-front (helps with some CF edges)
+        let req = http::Request::from(req);
+        let mut builder = http::Request::builder()
+            .method("GET")
+            .uri(req.uri().clone())
+            .header("Connection", "Upgrade")
+            .header("Upgrade", "websocket")
+            .header("Sec-WebSocket-Version", "13")
+            .header("Sec-WebSocket-Key", "binance-hft-rs")
+            .header("Origin", "https://binance.com");
+
+        if let Some(auth) = req.uri().authority() {
+            builder = builder.header("Host", auth.as_str());
+        }
+
+        let req = builder
+            .body(())
+            .map_err(|e| anyhow!("{e}"))?;
+
         let ws_cfg = WebSocketConfig {
             max_message_size: Some(1 << 22),  // 4 MiB
             max_frame_size: Some(1 << 22),
             ..Default::default()
         };
-        let (ws, _resp) = connect_with_config(req, Some(ws_cfg), 0)
-            .context("ws connect")?;
 
+        let (ws, _resp) = ws_connect_follow_redirects(req, ws_cfg, 3)
+            .context("ws connect")?;
         self.ws = Some(ws);
 
         // 2) Take REST snapshot
