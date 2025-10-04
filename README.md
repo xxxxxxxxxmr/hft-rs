@@ -111,7 +111,7 @@ Both binaries pin the current thread to the configured CPU core and stream log e
 ## Development Tips
 
 - `cargo fmt` and `cargo clippy` keep the code tidy.
+- `cargo run -p xtask -- <task>` provides shortcuts (`fmt`, `fmt-check`, `clippy`, `check`, `lint`).
 - Use `RUST_LOG` or external tooling if you want to redirect the structured logs to a file; currently everything goes to `stderr`.
 - The SPSC queue is intentionally minimal—extend it with statistics or blocking behaviour if you need multi-producer semantics in the future.
-
 
