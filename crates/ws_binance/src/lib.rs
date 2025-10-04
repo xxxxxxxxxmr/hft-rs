@@ -1,13 +1,17 @@
 use ahash::AHashMap;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use arrayvec::ArrayVec;
-use engine_core::{EngineHandler, EngineLogger, HandlerEvent};
+use engine_core::{EngineHandler, EngineLogger, HandlerEvent, LogEventKind};
 use hdrhistogram::Histogram;
 use reqwest::blocking::Client;
+use serde::Serialize;
 use simd_json::prelude::{ValueAsContainer, ValueAsScalar};
-use std::io;
+use std::fs;
+use std::fs::File;
+use std::io::{self, BufWriter, Write};
 use std::net::TcpStream;
-use std::time::{Duration, Instant};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tungstenite::client::IntoClientRequest;
 use tungstenite::http;
 use tungstenite::protocol::WebSocketConfig;
@@ -194,6 +198,120 @@ struct DepthSnap {
     asks: Vec<(String, String)>,
 }
 
+#[derive(Debug, Clone)]
+pub struct CaptureConfig {
+    pub root_dir: PathBuf,
+    pub session_label: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct BinanceConfig {
+    pub symbol: String,
+    pub capture: Option<CaptureConfig>,
+}
+
+#[derive(Serialize)]
+struct CaptureMetadata {
+    symbol: String,
+    started_at_ms: u64,
+    ended_at_ms: Option<u64>,
+    snapshot_path: String,
+    diffs_path: String,
+    snapshot_last_update_id: Option<u64>,
+    last_sequence: Option<u64>,
+}
+
+struct CaptureWriter {
+    session_dir: PathBuf,
+    snapshot_path: PathBuf,
+    diffs_writer: BufWriter<File>,
+    metadata_path: PathBuf,
+    metadata: CaptureMetadata,
+    snapshot_written: bool,
+}
+
+impl CaptureWriter {
+    fn new(symbol: &str, cfg: CaptureConfig) -> Result<Self> {
+        let session_label = cfg.session_label.unwrap_or_else(|| now_ms().to_string());
+        let session_dir = cfg.root_dir.join(symbol.to_lowercase()).join(session_label);
+        fs::create_dir_all(&session_dir)?;
+
+        let snapshot_path = session_dir.join("snapshot.json");
+        let diffs_path = session_dir.join("diffs.jsonl");
+        let metadata_path = session_dir.join("metadata.json");
+
+        let diffs_writer = BufWriter::new(File::create(&diffs_path)?);
+        let metadata = CaptureMetadata {
+            symbol: symbol.to_string(),
+            started_at_ms: now_ms(),
+            ended_at_ms: None,
+            snapshot_path: "snapshot.json".into(),
+            diffs_path: "diffs.jsonl".into(),
+            snapshot_last_update_id: None,
+            last_sequence: None,
+        };
+
+        let mut writer = Self {
+            session_dir,
+            snapshot_path,
+            diffs_writer,
+            metadata_path,
+            metadata,
+            snapshot_written: false,
+        };
+        writer.flush_metadata()?;
+        Ok(writer)
+    }
+
+    fn session_dir(&self) -> &Path {
+        &self.session_dir
+    }
+
+    fn record_snapshot(&mut self, raw: &str, last_update_id: u64) -> Result<()> {
+        if !self.snapshot_written {
+            let mut file = File::create(&self.snapshot_path)?;
+            file.write_all(raw.as_bytes())?;
+            file.write_all(b"\n")?;
+            file.flush()?;
+            self.snapshot_written = true;
+        }
+        self.metadata.snapshot_last_update_id = Some(last_update_id);
+        self.metadata.last_sequence = Some(last_update_id);
+        self.flush_metadata()
+    }
+
+    fn record_diff(&mut self, raw: &str, final_id: Option<u64>) -> Result<()> {
+        self.diffs_writer.write_all(raw.as_bytes())?;
+        if !raw.ends_with('\n') {
+            self.diffs_writer.write_all(b"\n")?;
+        }
+        self.diffs_writer.flush()?;
+        self.metadata.ended_at_ms = Some(now_ms());
+        if let Some(id) = final_id {
+            self.metadata.last_sequence = Some(id);
+        }
+        self.flush_metadata()
+    }
+
+    fn flush_metadata(&mut self) -> Result<()> {
+        let mut file = File::create(&self.metadata_path)?;
+        serde_json::to_writer_pretty(&mut file, &self.metadata)?;
+        file.write_all(b"\n")?;
+        file.flush()?;
+        Ok(())
+    }
+}
+
+fn now_ms() -> u64 {
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(dur) => dur
+            .as_secs()
+            .saturating_mul(1_000)
+            .saturating_add(dur.subsec_millis() as u64),
+        Err(_) => 0,
+    }
+}
+
 pub struct BinanceHandler {
     symbol: String, // e.g. BTCUSDT
     ws: Option<WebSocket<MaybeTlsStream<TcpStream>>>,
@@ -201,6 +319,8 @@ pub struct BinanceHandler {
     book: Book,
     last_update_id: u64,
     synced: bool,
+    capture: Option<CaptureWriter>,
+    capture_announced: bool,
     // metrics
     hist: Histogram<u64>,
     // buffers
@@ -209,7 +329,21 @@ pub struct BinanceHandler {
 
 impl BinanceHandler {
     pub fn new(symbol: String) -> Self {
-        Self {
+        Self::with_config(BinanceConfig {
+            symbol,
+            capture: None,
+        })
+        .expect("capture disabled cannot fail")
+    }
+
+    pub fn with_config(config: BinanceConfig) -> Result<Self> {
+        let BinanceConfig { symbol, capture } = config;
+        let capture_writer = match capture {
+            Some(cfg) => Some(CaptureWriter::new(&symbol, cfg)?),
+            None => None,
+        };
+
+        let handler = Self {
             symbol,
             ws: None,
             http: Client::builder()
@@ -219,9 +353,12 @@ impl BinanceHandler {
             book: Book::with_capacity(4096),
             last_update_id: 0,
             synced: false,
+            capture: capture_writer,
+            capture_announced: false,
             hist: Histogram::new(3).unwrap(),
             rx_buf: vec![0u8; 1 << 16], // 64 KiB
-        }
+        };
+        Ok(handler)
     }
 
     fn ws_url(&self) -> String {
@@ -284,43 +421,65 @@ impl BinanceHandler {
         self.ws = Some(ws);
         log.handler_event("binance", &self.symbol, HandlerEvent::Connected);
 
+        if !self.capture_announced {
+            if let Some(capture) = self.capture.as_ref() {
+                log.emit(LogEventKind::Text(format!(
+                    "[binance:{}] capture writing to {}",
+                    self.symbol,
+                    capture.session_dir().display()
+                )));
+            }
+            self.capture_announced = true;
+        }
+
         // 2) Take REST snapshot
-        let snap: DepthSnap = self
-            .http
-            .get(self.snapshot_url())
-            .send()
-            .map_err(|e| {
-                log.handler_event(
-                    "binance",
-                    &self.symbol,
-                    HandlerEvent::Error {
-                        detail: format!("snapshot request failed: {e}"),
-                    },
-                );
-                e
-            })?
-            .error_for_status()
-            .map_err(|e| {
-                log.handler_event(
-                    "binance",
-                    &self.symbol,
-                    HandlerEvent::Error {
-                        detail: format!("snapshot HTTP error: {e}"),
-                    },
-                );
-                e
-            })?
-            .json()
-            .map_err(|e| {
-                log.handler_event(
-                    "binance",
-                    &self.symbol,
-                    HandlerEvent::Error {
-                        detail: format!("snapshot decode failed: {e}"),
-                    },
-                );
-                e
-            })?;
+        let response = self.http.get(self.snapshot_url()).send().map_err(|e| {
+            log.handler_event(
+                "binance",
+                &self.symbol,
+                HandlerEvent::Error {
+                    detail: format!("snapshot request failed: {e}"),
+                },
+            );
+            e
+        })?;
+
+        let response = response.error_for_status().map_err(|e| {
+            log.handler_event(
+                "binance",
+                &self.symbol,
+                HandlerEvent::Error {
+                    detail: format!("snapshot HTTP error: {e}"),
+                },
+            );
+            e
+        })?;
+
+        let body = response.text().map_err(|e| {
+            log.handler_event(
+                "binance",
+                &self.symbol,
+                HandlerEvent::Error {
+                    detail: format!("snapshot read failed: {e}"),
+                },
+            );
+            e
+        })?;
+
+        let snap: DepthSnap = serde_json::from_str(&body).map_err(|e| {
+            log.handler_event(
+                "binance",
+                &self.symbol,
+                HandlerEvent::Error {
+                    detail: format!("snapshot decode failed: {e}"),
+                },
+            );
+            anyhow!(e)
+        })?;
+
+        if let Some(capture) = self.capture.as_mut() {
+            capture.record_snapshot(&body, snap.lastUpdateId)?;
+        }
         self.apply_snapshot(&snap)?;
         self.last_update_id = snap.lastUpdateId;
         self.synced = false; // need to roll forward until we see a diff with u >= lastUpdateId
@@ -354,6 +513,33 @@ impl BinanceHandler {
             }
         }
         Ok(())
+    }
+
+    fn process_payload(
+        &mut self,
+        raw: &str,
+        len: usize,
+        log: &EngineLogger,
+    ) -> Result<Option<Duration>> {
+        let t0 = Instant::now();
+        match parse_diff_owned(&mut self.rx_buf[..len]) {
+            Ok(diff) => {
+                let final_id = diff.final_id;
+                if let Some(capture) = self.capture.as_mut() {
+                    capture.record_diff(raw, Some(final_id))?;
+                }
+                self.apply_diff(&diff, log)?;
+                let elapsed = t0.elapsed();
+                self.hist.record(elapsed.as_micros() as u64).ok();
+                Ok(Some(elapsed))
+            }
+            Err(err) => {
+                if let Some(capture) = self.capture.as_mut() {
+                    capture.record_diff(raw, None)?;
+                }
+                Err(err)
+            }
+        }
     }
 
     fn apply_diff(&mut self, d: &DiffOwned, log: &EngineLogger) -> Result<()> {
@@ -420,23 +606,16 @@ impl EngineHandler for BinanceHandler {
         if let Message::Text(txt) = msg {
             let len = txt.len().min(self.rx_buf.len());
             self.rx_buf[..len].copy_from_slice(&txt.as_bytes()[..len]);
-
-            let t0 = Instant::now();
-            let diff = parse_diff_owned(&mut self.rx_buf[..len])?;
-            self.apply_diff(&diff, log)?;
-            let elapsed = t0.elapsed();
-            self.hist.record(elapsed.as_micros() as u64).ok();
-            return Ok(Some(elapsed));
+            return self.process_payload(&txt, len, log);
         } else if let Message::Binary(bin) = msg {
             let len = bin.len().min(self.rx_buf.len());
             self.rx_buf[..len].copy_from_slice(&bin[..len]);
-
-            let t0 = Instant::now();
-            let diff = parse_diff_owned(&mut self.rx_buf[..len])?;
-            self.apply_diff(&diff, log)?;
-            let elapsed = t0.elapsed();
-            self.hist.record(elapsed.as_micros() as u64).ok();
-            return Ok(Some(elapsed));
+            let raw_string = match std::str::from_utf8(&bin) {
+                Ok(s) => s.to_owned(),
+                Err(_) => String::from_utf8_lossy(&bin).into_owned(),
+            };
+            let result = self.process_payload(raw_string.as_str(), len, log);
+            return result;
         }
         // Ignore pings/pongs/others for now
         Ok(None)

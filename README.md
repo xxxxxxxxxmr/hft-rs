@@ -101,6 +101,7 @@ Both binaries pin the current thread to the configured CPU core and stream log e
 - Connects to `wss://stream.binance.com:9443/ws/<symbol>@depth@100ms` with a manual redirect-follow helper.
 - REST snapshot hits `https://api.binance.com/api/v3/depth?limit=1000` and applies the book into a small `AHashMap`-backed structure.
 - Emits structured events: connection lifecycle, snapshot size, synchronization progress, per-diff stats, and latency percentiles.
+- Supports an optional on-disk capture mode (see below) that writes the raw snapshot, diff stream, and metadata in a layout reusable by the replay tool.
 
 ### Hyperliquid (`crates/ws_hyperliquid`)
 
@@ -115,3 +116,37 @@ Both binaries pin the current thread to the configured CPU core and stream log e
 - Use `RUST_LOG` or external tooling if you want to redirect the structured logs to a file; currently everything goes to `stderr`.
 - The SPSC queue is intentionally minimal—extend it with statistics or blocking behaviour if you need multi-producer semantics in the future.
 
+## Capturing Binance Depth Streams
+
+The `poc_binance` binary accepts two optional flags to persist raw market data in a layout consumed by `replay_binance`:
+
+```bash
+cargo run -p bin --bin poc_binance -- \
+  --capture-dir data/binance \
+  --capture-session 2025-10-04-btcusdt
+```
+
+- `--capture-dir` points at the root directory where sessions should be stored. The handler creates `<capture-dir>/<symbol>/<session>/`.
+- `--capture-session` is an optional label; when omitted the handler uses the current epoch milliseconds.
+
+Each session folder contains:
+
+- `snapshot.json` – the REST snapshot payload used for seeding the replay.
+- `diffs.jsonl` – raw WebSocket diff messages (one per line).
+- `metadata.json` – capture metadata tracking timestamps and the latest applied sequence.
+
+The capture mode updates `metadata.json` incrementally so long-running sessions can be inspected while still recording.
+
+## Replaying Captures & Exporting Comparison Sets
+
+The `replay_binance` binary consumes the captured files and reconstructs an L3 book. It can emit inferred events to stdout (default), JSONL, or bincode files:
+
+```bash
+cargo run -p replay_binance -- \
+  --snapshot data/binance/btcusdt/2024-05-07-btcusdt/snapshot.json \
+  --diffs data/binance/btcusdt/2024-05-07-btcusdt/diffs.jsonl \
+  --out data/binance/btcusdt/2024-05-07-btcusdt/inferred.jsonl \
+  --out-format jsonl
+```
+
+Use `--out-format bincode` to produce a compact binary stream suitable for offline comparison pipelines. All emitted events mirror the `InferredEvent` schema (see `crates/replay_binance/src/book.rs`).
