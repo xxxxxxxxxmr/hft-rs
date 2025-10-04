@@ -1,7 +1,7 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use arrayvec::ArrayVec;
 use ahash::AHashMap;
-use engine_core::EngineHandler;
+use engine_core::{EngineHandler, EngineLogger, HandlerEvent};
 use hdrhistogram::Histogram;
 use reqwest::blocking::Client;
 use std::io;
@@ -218,7 +218,7 @@ impl BinanceHandler {
         )
     }
 
-    fn ensure_ws(&mut self) -> Result<()> {
+    fn ensure_ws(&mut self, log: &EngineLogger) -> Result<()> {
         if self.ws.is_some() { return Ok(()); }
 
         // 1) Connect WS with small read timeout and TCP_NODELAY
@@ -251,16 +251,65 @@ impl BinanceHandler {
         };
 
         let (ws, _resp) = ws_connect_follow_redirects(req, ws_cfg, 3)
-            .context("ws connect")?;
+            .map_err(|e| {
+                log.handler_event(
+                    "binance",
+                    &self.symbol,
+                    HandlerEvent::Error {
+                        detail: format!("ws connect failure: {e}"),
+                    },
+                );
+                e
+            })?;
         self.ws = Some(ws);
+        log.handler_event("binance", &self.symbol, HandlerEvent::Connected);
 
         // 2) Take REST snapshot
         let snap: DepthSnap = self.http.get(self.snapshot_url())
-            .send()?.error_for_status()?
-            .json()?;
+            .send()
+            .map_err(|e| {
+                log.handler_event(
+                    "binance",
+                    &self.symbol,
+                    HandlerEvent::Error {
+                        detail: format!("snapshot request failed: {e}"),
+                    },
+                );
+                e
+            })?
+            .error_for_status()
+            .map_err(|e| {
+                log.handler_event(
+                    "binance",
+                    &self.symbol,
+                    HandlerEvent::Error {
+                        detail: format!("snapshot HTTP error: {e}"),
+                    },
+                );
+                e
+            })?
+            .json()
+            .map_err(|e| {
+                log.handler_event(
+                    "binance",
+                    &self.symbol,
+                    HandlerEvent::Error {
+                        detail: format!("snapshot decode failed: {e}"),
+                    },
+                );
+                e
+            })?;
         self.apply_snapshot(&snap)?;
         self.last_update_id = snap.lastUpdateId;
         self.synced = false; // need to roll forward until we see a diff with u >= lastUpdateId
+        log.handler_event(
+            "binance",
+            &self.symbol,
+            HandlerEvent::SnapshotApplied {
+                bids: snap.bids.len(),
+                asks: snap.asks.len(),
+            },
+        );
 
         Ok(())
     }
@@ -281,14 +330,25 @@ impl BinanceHandler {
         Ok(())
     }
 
-    fn apply_diff(&mut self, d: &DiffOwned) -> Result<()> {
+    fn apply_diff(&mut self, d: &DiffOwned, log: &EngineLogger) -> Result<()> {
         if !self.synced {
             if d.final_id < self.last_update_id + 1 {
                 return Ok(());
             }
             if d.first_id <= self.last_update_id + 1 && self.last_update_id + 1 <= d.final_id {
                 self.synced = true;
+                log.handler_event("binance", &self.symbol, HandlerEvent::Synchronized);
             } else {
+                log.handler_event(
+                    "binance",
+                    &self.symbol,
+                    HandlerEvent::Error {
+                        detail: format!(
+                            "seq gap before sync: have={}, diff[{}..{}]",
+                            self.last_update_id, d.first_id, d.final_id
+                        ),
+                    },
+                );
                 return Err(anyhow!(
                     "seq gap before sync: have={}, diff[{}..{}]",
                     self.last_update_id, d.first_id, d.final_id
@@ -308,8 +368,8 @@ impl BinanceHandler {
 }
 
 impl EngineHandler for BinanceHandler {
-    fn poll_once(&mut self) -> Result<Option<Duration>> {
-        self.ensure_ws()?;
+    fn poll_once(&mut self, log: &EngineLogger) -> Result<Option<Duration>> {
+        self.ensure_ws(log)?;
 
         let ws = self.ws.as_mut().unwrap();
         // Read one frame with a small timeout. We set read_timeout on the socket,
@@ -333,7 +393,7 @@ impl EngineHandler for BinanceHandler {
         
             let t0 = Instant::now();
             let diff = parse_diff_owned(&mut self.rx_buf[..len])?;
-            self.apply_diff(&diff)?;
+            self.apply_diff(&diff, log)?;
             let elapsed = t0.elapsed();
             self.hist.record(elapsed.as_micros() as u64).ok();
             return Ok(Some(elapsed));
@@ -343,7 +403,7 @@ impl EngineHandler for BinanceHandler {
         
             let t0 = Instant::now();
             let diff = parse_diff_owned(&mut self.rx_buf[..len])?;
-            self.apply_diff(&diff)?;
+            self.apply_diff(&diff, log)?;
             let elapsed = t0.elapsed();
             self.hist.record(elapsed.as_micros() as u64).ok();
             return Ok(Some(elapsed));
@@ -352,10 +412,17 @@ impl EngineHandler for BinanceHandler {
         Ok(None)
     }
 
-    fn flush_metrics(&mut self) {
+    fn flush_metrics(&mut self, log: &EngineLogger) {
         let p50 = self.hist.value_at_percentile(50.0);
         let p99 = self.hist.value_at_percentile(99.0);
-        eprintln!("[binance:{}] packet→apply: p50={}us p99={}us lastU={}",
-            self.symbol, p50, p99, self.last_update_id);
+        log.handler_event(
+            "binance",
+            &self.symbol,
+            HandlerEvent::Metrics {
+                p50,
+                p99,
+                last_seq: Some(self.last_update_id),
+            },
+        );
     }
 }

@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use arrayvec::ArrayVec;
 use ahash::AHashMap;
-use engine_core::EngineHandler;
+use engine_core::{EngineHandler, EngineLogger, HandlerEvent};
 use hdrhistogram::Histogram;
 use simd_json::prelude::{ValueAsContainer, ValueAsScalar};
 use std::net::TcpStream;
@@ -106,6 +106,7 @@ pub struct HyperHandler {
     rx_buf: Vec<u8>,
     hist: Histogram<u64>,
     subscribed: bool,
+    got_initial: bool,
 }
 
 impl HyperHandler {
@@ -117,6 +118,7 @@ impl HyperHandler {
             rx_buf: vec![0u8; 1<<16],
             hist: Histogram::new(3).unwrap(),
             subscribed: false,
+            got_initial: false,
         }
     }
 
@@ -124,7 +126,7 @@ impl HyperHandler {
         "wss://api.hyperliquid-testnet.xyz/ws".to_string()
     }
 
-    fn ensure_ws(&mut self) -> Result<()> {
+    fn ensure_ws(&mut self, log: &EngineLogger) -> Result<()> {
         if self.ws.is_some() { return Ok(()); }
 
         let url = self.ws_url();
@@ -152,13 +154,24 @@ impl HyperHandler {
             max_frame_size: Some(1<<22),
             ..Default::default()
         };
-        let (ws, _resp) = connect_with_config(req, Some(ws_cfg), 0).context("ws connect")?;
+        let (ws, _resp) = connect_with_config(req, Some(ws_cfg), 0)
+            .map_err(|e| {
+                log.handler_event(
+                    "hyperliquid",
+                    &self.coin,
+                    HandlerEvent::Error {
+                        detail: format!("ws connect failure: {e}"),
+                    },
+                );
+                e
+            })?;
         self.ws = Some(ws);
         self.subscribed = false;
+        log.handler_event("hyperliquid", &self.coin, HandlerEvent::Connected);
         Ok(())
     }
 
-    fn subscribe_l2(&mut self) -> Result<()> {
+    fn subscribe_l2(&mut self, log: &EngineLogger) -> Result<()> {
         if self.subscribed { return Ok(()); }
         let ws = self.ws.as_mut().ok_or_else(|| anyhow!("no ws"))?;
 
@@ -170,30 +183,48 @@ impl HyperHandler {
         );
         ws.send(Message::Text(sub)).context("send sub")?;
         self.subscribed = true;
+        log.handler_event("hyperliquid", &self.coin, HandlerEvent::SubscriptionSent);
         Ok(())
     }
 
-    fn apply_book(&mut self, up: &BookUpdate) {
+    fn apply_book(&mut self, up: &BookUpdate) -> (usize, usize, bool) {
         // HL sends full snapshot-ish levels each push; treat as set operations
         for (px, sz) in up.bids.iter() { self.book.set_bid(*px, *sz); }
         for (px, sz) in up.asks.iter() { self.book.set_ask(*px, *sz); }
+        let was_initial = !self.got_initial;
+        if was_initial {
+            self.got_initial = true;
+        }
+        (up.bids.len(), up.asks.len(), was_initial)
     }
 }
 
 impl EngineHandler for HyperHandler {
-    fn poll_once(&mut self) -> Result<Option<Duration>> {
-        self.ensure_ws()?;
-        self.subscribe_l2()?;
+    fn poll_once(&mut self, log: &EngineLogger) -> Result<Option<Duration>> {
+        self.ensure_ws(log)?;
+        self.subscribe_l2(log)?;
 
         let ws = self.ws.as_mut().unwrap();
         let msg = match ws.read() {
             Ok(m) => m,
             Err(tungstenite::Error::AlreadyClosed) => {
+                log.handler_event(
+                    "hyperliquid",
+                    &self.coin,
+                    HandlerEvent::Warning { detail: "ws closed by peer".into() },
+                );
                 self.ws = None; return Ok(None);
             }
             Err(tungstenite::Error::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock
                 || e.kind() == std::io::ErrorKind::TimedOut => { return Ok(None); }
-            Err(e) => return Err(e.into()),
+            Err(e) => {
+                log.handler_event(
+                    "hyperliquid",
+                    &self.coin,
+                    HandlerEvent::Error { detail: format!("ws read error: {e}") },
+                );
+                return Err(e.into());
+            }
         };
 
         match msg {
@@ -204,11 +235,25 @@ impl EngineHandler for HyperHandler {
                 if txt.contains(r#""channel":"l2Book""#) || txt.contains(r#""levels":"#) || txt.contains(r#""levels":[["#) {
                     let t0 = Instant::now();
                     if let Some(up) = parse_wsbook_owned(&mut self.rx_buf[..len])? {
-                        self.apply_book(&up);
+                        let (bids, asks, first) = self.apply_book(&up);
                         let dt = t0.elapsed();
                         self.hist.record(dt.as_micros() as u64).ok();
+                        if first {
+                            log.handler_event(
+                                "hyperliquid",
+                                &self.coin,
+                                HandlerEvent::SnapshotApplied { bids, asks },
+                            );
+                        }
                         Ok(Some(dt))
                     } else {
+                        log.handler_event(
+                            "hyperliquid",
+                            &self.coin,
+                            HandlerEvent::Warning {
+                                detail: "unexpected message without levels".into(),
+                            },
+                        );
                         Ok(None)
                     }
                 } else {
@@ -220,9 +265,16 @@ impl EngineHandler for HyperHandler {
                 self.rx_buf[..len].copy_from_slice(&bin[..len]);
                 let t0 = Instant::now();
                 if let Some(up) = parse_wsbook_owned(&mut self.rx_buf[..len])? {
-                    self.apply_book(&up);
+                    let (bids, asks, first) = self.apply_book(&up);
                     let dt = t0.elapsed();
                     self.hist.record(dt.as_micros() as u64).ok();
+                    if first {
+                        log.handler_event(
+                            "hyperliquid",
+                            &self.coin,
+                            HandlerEvent::SnapshotApplied { bids, asks },
+                        );
+                    }
                     Ok(Some(dt))
                 } else {
                     Ok(None)
@@ -232,9 +284,17 @@ impl EngineHandler for HyperHandler {
         }
     }
 
-    fn flush_metrics(&mut self) {
+    fn flush_metrics(&mut self, log: &EngineLogger) {
         let p50 = self.hist.value_at_percentile(50.0);
         let p99 = self.hist.value_at_percentile(99.0);
-        eprintln!("[hyperliquid:{}] l2Book packet→apply: p50={}us p99={}us", self.coin, p50, p99);
+        log.handler_event(
+            "hyperliquid",
+            &self.coin,
+            HandlerEvent::Metrics {
+                p50,
+                p99,
+                last_seq: None,
+            },
+        );
     }
 }

@@ -52,6 +52,11 @@ impl<T, const N: usize> Producer<T, N> {
     pub fn capacity(&self) -> usize {
         N
     }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.ring.len()
+    }
 }
 
 impl<T, const N: usize> Consumer<T, N> {
@@ -63,6 +68,11 @@ impl<T, const N: usize> Consumer<T, N> {
     #[inline]
     pub fn capacity(&self) -> usize {
         N
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.ring.len()
     }
 }
 
@@ -99,5 +109,12 @@ impl<T, const N: usize> Ring<T, N> {
         let val = unsafe { (*self.buf[t % N].get()).take() };
         self.tail.store(t + 1, Ordering::Release);
         val
+    }
+
+    #[inline]
+    fn len(&self) -> usize {
+        let h = self.head.load(Ordering::Acquire);
+        let t = self.tail.load(Ordering::Acquire);
+        h - t
     }
 }
