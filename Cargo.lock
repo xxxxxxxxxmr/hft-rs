@@ -355,6 +355,7 @@ dependencies = [
  "crossbeam-utils",
  "hdrhistogram",
  "simd-json",
+ "spsc",
 ]
 
 [[package]]

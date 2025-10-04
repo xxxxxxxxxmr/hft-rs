@@ -10,3 +10,4 @@ simd-json = "0.13"
 arrayvec = "0.7"
 crossbeam-utils = "0.8"
 hdrhistogram = "7"
+spsc = { path = "../spsc" }
