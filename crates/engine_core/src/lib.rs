@@ -2,7 +2,7 @@ use std::panic::{self, AssertUnwindSafe};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use spsc::{channel, Consumer, Producer};
+use spsc::{Consumer, Producer, channel};
 
 pub struct EngineConfig {
     pub symbol: String,
@@ -15,11 +15,23 @@ pub type EngineLogger = Logger<LOG_CAPACITY>;
 
 #[derive(Debug, Clone)]
 pub enum LogEventKind {
-    EngineStarted { venue: String, symbol: String },
-    EngineApplyLatency { micros: u64 },
+    EngineStarted {
+        venue: String,
+        symbol: String,
+    },
+    EngineApplyLatency {
+        micros: u64,
+    },
     EngineMetricsFlushed,
-    EngineLogQueue { depth: usize, capacity: usize },
-    HandlerEvent { venue: &'static str, symbol: String, event: HandlerEvent },
+    EngineLogQueue {
+        depth: usize,
+        capacity: usize,
+    },
+    HandlerEvent {
+        venue: &'static str,
+        symbol: String,
+        event: HandlerEvent,
+    },
     Text(String),
     Shutdown,
 }
@@ -29,11 +41,25 @@ pub enum HandlerEvent {
     Connected,
     SubscriptionSent,
     Synchronized,
-    SnapshotApplied { bids: usize, asks: usize },
-    DiffApplied { bids: usize, asks: usize },
-    Metrics { p50: u64, p99: u64, last_seq: Option<u64> },
-    Warning { detail: String },
-    Error { detail: String },
+    SnapshotApplied {
+        bids: usize,
+        asks: usize,
+    },
+    DiffApplied {
+        bids: usize,
+        asks: usize,
+    },
+    Metrics {
+        p50: u64,
+        p99: u64,
+        last_seq: Option<u64>,
+    },
+    Warning {
+        detail: String,
+    },
+    Error {
+        detail: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -98,7 +124,12 @@ fn logging_worker<const N: usize>(consumer: Consumer<LogEvent, N>) {
             let delta = event.timestamp.elapsed();
             match event.kind {
                 LogEventKind::EngineStarted { venue, symbol } => {
-                    eprintln!("[engine] {}:{} started (+{}us)", venue, symbol, delta.as_micros());
+                    eprintln!(
+                        "[engine] {}:{} started (+{}us)",
+                        venue,
+                        symbol,
+                        delta.as_micros()
+                    );
                 }
                 LogEventKind::EngineApplyLatency { micros } => {
                     eprintln!("[latency] apply {}us (+{}us)", micros, delta.as_micros());
@@ -114,86 +145,88 @@ fn logging_worker<const N: usize>(consumer: Consumer<LogEvent, N>) {
                         delta.as_micros()
                     );
                 }
-                LogEventKind::HandlerEvent { venue, symbol, event } => {
-                    match event {
-                        HandlerEvent::Connected => {
-                            eprintln!(
-                                "[{}:{}] connected (+{}us)",
-                                venue,
-                                symbol,
-                                delta.as_micros()
-                            );
-                        }
-                        HandlerEvent::SubscriptionSent => {
-                            eprintln!(
-                                "[{}:{}] subscription sent (+{}us)",
-                                venue,
-                                symbol,
-                                delta.as_micros()
-                            );
-                        }
-                        HandlerEvent::SnapshotApplied { bids, asks } => {
-                            eprintln!(
-                                "[{}:{}] snapshot applied bids={} asks={} (+{}us)",
-                                venue,
-                                symbol,
-                                bids,
-                                asks,
-                                delta.as_micros()
-                            );
-                        }
-                        HandlerEvent::Synchronized => {
-                            eprintln!(
-                                "[{}:{}] feed synchronized (+{}us)",
-                                venue,
-                                symbol,
-                                delta.as_micros()
-                            );
-                        }
-                        HandlerEvent::DiffApplied { bids, asks } => {
-                            eprintln!(
-                                "[{}:{}] diff applied bids={} asks={} (+{}us)",
-                                venue,
-                                symbol,
-                                bids,
-                                asks,
-                                delta.as_micros()
-                            );
-                        }
-                        HandlerEvent::Metrics { p50, p99, last_seq } => {
-                            let seq_display = last_seq
-                                .map(|s| s.to_string())
-                                .unwrap_or_else(|| "n/a".to_string());
-                            eprintln!(
-                                "[{}:{}] latency p50={}us p99={}us last_seq={} (+{}us)",
-                                venue,
-                                symbol,
-                                p50,
-                                p99,
-                                seq_display,
-                                delta.as_micros()
-                            );
-                        }
-                        HandlerEvent::Warning { detail } => {
-                            eprintln!(
-                                "[{}:{} WARN] {} (+{}us)",
-                                venue,
-                                symbol,
-                                detail,
-                                delta.as_micros()
-                            );
-                        }
-                        HandlerEvent::Error { detail } => {
-                            eprintln!(
-                                "[{}:{} ERROR] {} (+{}us)",
-                                venue,
-                                symbol,
-                                detail,
-                                delta.as_micros()
-                            );
-                        }
+                LogEventKind::HandlerEvent {
+                    venue,
+                    symbol,
+                    event,
+                } => match event {
+                    HandlerEvent::Connected => {
+                        eprintln!(
+                            "[{}:{}] connected (+{}us)",
+                            venue,
+                            symbol,
+                            delta.as_micros()
+                        );
                     }
-                }
+                    HandlerEvent::SubscriptionSent => {
+                        eprintln!(
+                            "[{}:{}] subscription sent (+{}us)",
+                            venue,
+                            symbol,
+                            delta.as_micros()
+                        );
+                    }
+                    HandlerEvent::SnapshotApplied { bids, asks } => {
+                        eprintln!(
+                            "[{}:{}] snapshot applied bids={} asks={} (+{}us)",
+                            venue,
+                            symbol,
+                            bids,
+                            asks,
+                            delta.as_micros()
+                        );
+                    }
+                    HandlerEvent::Synchronized => {
+                        eprintln!(
+                            "[{}:{}] feed synchronized (+{}us)",
+                            venue,
+                            symbol,
+                            delta.as_micros()
+                        );
+                    }
+                    HandlerEvent::DiffApplied { bids, asks } => {
+                        eprintln!(
+                            "[{}:{}] diff applied bids={} asks={} (+{}us)",
+                            venue,
+                            symbol,
+                            bids,
+                            asks,
+                            delta.as_micros()
+                        );
+                    }
+                    HandlerEvent::Metrics { p50, p99, last_seq } => {
+                        let seq_display = last_seq
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| "n/a".to_string());
+                        eprintln!(
+                            "[{}:{}] latency p50={}us p99={}us last_seq={} (+{}us)",
+                            venue,
+                            symbol,
+                            p50,
+                            p99,
+                            seq_display,
+                            delta.as_micros()
+                        );
+                    }
+                    HandlerEvent::Warning { detail } => {
+                        eprintln!(
+                            "[{}:{} WARN] {} (+{}us)",
+                            venue,
+                            symbol,
+                            detail,
+                            delta.as_micros()
+                        );
+                    }
+                    HandlerEvent::Error { detail } => {
+                        eprintln!(
+                            "[{}:{} ERROR] {} (+{}us)",
+                            venue,
+                            symbol,
+                            detail,
+                            delta.as_micros()
+                        );
+                    }
+                },
                 LogEventKind::Text(text) => {
                     eprintln!("[log] {} (+{}us)", text, delta.as_micros());
                 }
@@ -230,12 +263,16 @@ impl<H: EngineHandler> Engine<H> {
     pub fn run(mut self) -> anyhow::Result<()> {
         let (log_tx, log_rx) = channel::<LogEvent, LOG_CAPACITY>();
         let logger = Logger::with_producer(log_tx.clone());
-        let mut logger_thread: Option<JoinHandle<()>> = Some(thread::Builder::new()
-            .name("logger".into())
-            .spawn(move || logging_worker(log_rx))
-            .expect("spawn logger thread"));
+        let mut logger_thread: Option<JoinHandle<()>> = Some(
+            thread::Builder::new()
+                .name("logger".into())
+                .spawn(move || logging_worker(log_rx))
+                .expect("spawn logger thread"),
+        );
 
-        let core = core_affinity::CoreId { id: self.cfg.core_id };
+        let core = core_affinity::CoreId {
+            id: self.cfg.core_id,
+        };
         core_affinity::set_for_current(core);
         logger.emit(LogEventKind::EngineStarted {
             venue: self.cfg.venue.clone(),
@@ -244,7 +281,8 @@ impl<H: EngineHandler> Engine<H> {
 
         let mut last_flush = Instant::now();
         loop {
-            let poll_result = panic::catch_unwind(AssertUnwindSafe(|| self.handler.poll_once(&logger)));
+            let poll_result =
+                panic::catch_unwind(AssertUnwindSafe(|| self.handler.poll_once(&logger)));
             match poll_result {
                 Ok(Ok(Some(latency))) => {
                     logger.emit(LogEventKind::EngineApplyLatency {
@@ -253,9 +291,7 @@ impl<H: EngineHandler> Engine<H> {
                 }
                 Ok(Ok(None)) => {}
                 Ok(Err(err)) => {
-                    logger.emit(LogEventKind::Text(format!(
-                        "handler error: {err}"
-                    )));
+                    logger.emit(LogEventKind::Text(format!("handler error: {err}")));
                     logger.shutdown();
                     if let Some(handle) = logger_thread.take() {
                         let _ = handle.join();

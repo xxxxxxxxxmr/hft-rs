@@ -1,24 +1,27 @@
+use ahash::AHashMap;
 use anyhow::{anyhow, Result};
 use arrayvec::ArrayVec;
-use ahash::AHashMap;
 use engine_core::{EngineHandler, EngineLogger, HandlerEvent};
 use hdrhistogram::Histogram;
 use reqwest::blocking::Client;
+use simd_json::prelude::{ValueAsContainer, ValueAsScalar};
 use std::io;
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
 use tungstenite::client::IntoClientRequest;
 use tungstenite::http;
 use tungstenite::protocol::WebSocketConfig;
-use tungstenite::{Message, WebSocket};
 use tungstenite::stream::MaybeTlsStream;
-use simd_json::prelude::{ValueAsContainer, ValueAsScalar};
+use tungstenite::{Message, WebSocket};
 
 fn ws_connect_follow_redirects(
     mut req: http::Request<()>,
     ws_cfg: WebSocketConfig,
     max_hops: usize,
-) -> Result<(WebSocket<MaybeTlsStream<TcpStream>>, http::Response<Option<Vec<u8>>>)> {
+) -> Result<(
+    WebSocket<MaybeTlsStream<TcpStream>>,
+    http::Response<Option<Vec<u8>>>,
+)> {
     use http::StatusCode;
     use tungstenite::client::connect_with_config as ws_connect;
     use tungstenite::error::Error as WsError;
@@ -60,9 +63,7 @@ fn ws_connect_follow_redirects(
                             builder = builder.header("Host", host);
                         }
 
-                        req = builder
-                            .body(())
-                            .map_err(|e| anyhow!("{e}"))?;
+                        req = builder.body(()).map_err(|e| anyhow!("{e}"))?;
                         hops += 1;
                         continue;
                     }
@@ -95,11 +96,19 @@ impl Book {
     }
     #[inline]
     fn set_bid(&mut self, px: u64, qty: f64) {
-        if qty == 0.0 { self.bids.remove(&px); } else { self.bids.insert(px, qty); }
+        if qty == 0.0 {
+            self.bids.remove(&px);
+        } else {
+            self.bids.insert(px, qty);
+        }
     }
     #[inline]
     fn set_ask(&mut self, px: u64, qty: f64) {
-        if qty == 0.0 { self.asks.remove(&px); } else { self.asks.insert(px, qty); }
+        if qty == 0.0 {
+            self.asks.remove(&px);
+        } else {
+            self.asks.insert(px, qty);
+        }
     }
 }
 
@@ -107,23 +116,21 @@ impl Book {
 /// Adjust if you want exact tick size; for BTCUSDT, 1e2 or 1e1 may be enough. Keep it simple here.
 #[inline]
 fn px_to_ticks(s: &str) -> Result<u64> {
-    let v: f64 = lexical_core::parse(s.as_bytes())
-        .map_err(|_| anyhow!("bad price"))?;
+    let v: f64 = lexical_core::parse(s.as_bytes()).map_err(|_| anyhow!("bad price"))?;
     Ok((v * 10_000.0).round() as u64)
 }
 
 #[inline]
 fn qty_from_str(s: &str) -> Result<f64> {
-    let v: f64 = lexical_core::parse(s.as_bytes())
-        .map_err(|_| anyhow!("bad qty"))?;
+    let v: f64 = lexical_core::parse(s.as_bytes()).map_err(|_| anyhow!("bad qty"))?;
     Ok(v)
 }
 
 /// Binance diff-depth JSON (subset)
 #[derive(Debug)]
 struct DiffOwned {
-    first_id: u64,  // U
-    final_id: u64,  // u
+    first_id: u64, // U
+    final_id: u64, // u
     bids: ArrayVec<(u64, f64), MAX_LEVELS_PER_MSG>,
     asks: ArrayVec<(u64, f64), MAX_LEVELS_PER_MSG>,
 }
@@ -132,8 +139,14 @@ fn parse_diff_owned(buf: &mut [u8]) -> Result<DiffOwned> {
     let v: simd_json::BorrowedValue<'_> = simd_json::to_borrowed_value(buf)?;
     let obj = v.as_object().ok_or_else(|| anyhow!("not obj"))?;
 
-    let first_id = obj.get("U").and_then(|x| x.as_u64()).ok_or_else(|| anyhow!("no U"))?;
-    let final_id = obj.get("u").and_then(|x| x.as_u64()).ok_or_else(|| anyhow!("no u"))?;
+    let first_id = obj
+        .get("U")
+        .and_then(|x| x.as_u64())
+        .ok_or_else(|| anyhow!("no U"))?;
+    let final_id = obj
+        .get("u")
+        .and_then(|x| x.as_u64())
+        .ok_or_else(|| anyhow!("no u"))?;
 
     let mut bids = ArrayVec::<(u64, f64), MAX_LEVELS_PER_MSG>::new();
     let mut asks = ArrayVec::<(u64, f64), MAX_LEVELS_PER_MSG>::new();
@@ -161,7 +174,12 @@ fn parse_diff_owned(buf: &mut [u8]) -> Result<DiffOwned> {
         }
     }
 
-    Ok(DiffOwned { first_id, final_id, bids, asks })
+    Ok(DiffOwned {
+        first_id,
+        final_id,
+        bids,
+        asks,
+    })
 }
 
 /// REST snapshot shape (subset)
@@ -174,7 +192,7 @@ struct DepthSnap {
 }
 
 pub struct BinanceHandler {
-    symbol: String,              // e.g. BTCUSDT
+    symbol: String, // e.g. BTCUSDT
     ws: Option<WebSocket<MaybeTlsStream<TcpStream>>>,
     http: Client,
     book: Book,
@@ -219,7 +237,9 @@ impl BinanceHandler {
     }
 
     fn ensure_ws(&mut self, log: &EngineLogger) -> Result<()> {
-        if self.ws.is_some() { return Ok(()); }
+        if self.ws.is_some() {
+            return Ok(());
+        }
 
         // 1) Connect WS with small read timeout and TCP_NODELAY
         let url = self.ws_url();
@@ -240,32 +260,31 @@ impl BinanceHandler {
             builder = builder.header("Host", auth.as_str());
         }
 
-        let req = builder
-            .body(())
-            .map_err(|e| anyhow!("{e}"))?;
+        let req = builder.body(()).map_err(|e| anyhow!("{e}"))?;
 
         let ws_cfg = WebSocketConfig {
-            max_message_size: Some(1 << 22),  // 4 MiB
+            max_message_size: Some(1 << 22), // 4 MiB
             max_frame_size: Some(1 << 22),
             ..Default::default()
         };
 
-        let (ws, _resp) = ws_connect_follow_redirects(req, ws_cfg, 3)
-            .map_err(|e| {
-                log.handler_event(
-                    "binance",
-                    &self.symbol,
-                    HandlerEvent::Error {
-                        detail: format!("ws connect failure: {e}"),
-                    },
-                );
-                e
-            })?;
+        let (ws, _resp) = ws_connect_follow_redirects(req, ws_cfg, 3).map_err(|e| {
+            log.handler_event(
+                "binance",
+                &self.symbol,
+                HandlerEvent::Error {
+                    detail: format!("ws connect failure: {e}"),
+                },
+            );
+            e
+        })?;
         self.ws = Some(ws);
         log.handler_event("binance", &self.symbol, HandlerEvent::Connected);
 
         // 2) Take REST snapshot
-        let snap: DepthSnap = self.http.get(self.snapshot_url())
+        let snap: DepthSnap = self
+            .http
+            .get(self.snapshot_url())
             .send()
             .map_err(|e| {
                 log.handler_event(
@@ -320,12 +339,16 @@ impl BinanceHandler {
         for (p, q) in &snap.bids {
             let px = px_to_ticks(p)?;
             let qty = qty_from_str(q)?;
-            if qty != 0.0 { self.book.set_bid(px, qty); }
+            if qty != 0.0 {
+                self.book.set_bid(px, qty);
+            }
         }
         for (p, q) in &snap.asks {
             let px = px_to_ticks(p)?;
             let qty = qty_from_str(q)?;
-            if qty != 0.0 { self.book.set_ask(px, qty); }
+            if qty != 0.0 {
+                self.book.set_ask(px, qty);
+            }
         }
         Ok(())
     }
@@ -351,11 +374,13 @@ impl BinanceHandler {
                 );
                 return Err(anyhow!(
                     "seq gap before sync: have={}, diff[{}..{}]",
-                    self.last_update_id, d.first_id, d.final_id
+                    self.last_update_id,
+                    d.first_id,
+                    d.final_id
                 ));
             }
         }
-    
+
         for (px, qty) in d.bids.iter() {
             self.book.set_bid(*px, *qty);
         }
@@ -376,7 +401,9 @@ impl EngineHandler for BinanceHandler {
         // so tungstenite will surface WouldBlock / io::ErrorKind::WouldBlock via the TLS layer.
         let msg = match ws.read() {
             Ok(m) => m,
-            Err(tungstenite::Error::Io(e)) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {
+            Err(tungstenite::Error::Io(e))
+                if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut =>
+            {
                 // nothing to do
                 return Ok(None);
             }
@@ -390,7 +417,7 @@ impl EngineHandler for BinanceHandler {
         if let Message::Text(txt) = msg {
             let len = txt.len().min(self.rx_buf.len());
             self.rx_buf[..len].copy_from_slice(&txt.as_bytes()[..len]);
-        
+
             let t0 = Instant::now();
             let diff = parse_diff_owned(&mut self.rx_buf[..len])?;
             self.apply_diff(&diff, log)?;
@@ -400,7 +427,7 @@ impl EngineHandler for BinanceHandler {
         } else if let Message::Binary(bin) = msg {
             let len = bin.len().min(self.rx_buf.len());
             self.rx_buf[..len].copy_from_slice(&bin[..len]);
-        
+
             let t0 = Instant::now();
             let diff = parse_diff_owned(&mut self.rx_buf[..len])?;
             self.apply_diff(&diff, log)?;

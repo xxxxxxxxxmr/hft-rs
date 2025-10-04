@@ -1,6 +1,6 @@
 use std::cell::UnsafeCell;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Bounded SPSC ring buffer
 pub struct Ring<T, const N: usize> {
@@ -35,9 +35,7 @@ impl<T, const N: usize> Clone for Consumer<T, N> {
 
 pub fn channel<T, const N: usize>() -> (Producer<T, N>, Consumer<T, N>) {
     let ring = Arc::new(Ring::new());
-    let prod = Producer {
-        ring: ring.clone(),
-    };
+    let prod = Producer { ring: ring.clone() };
     let cons = Consumer { ring };
     (prod, cons)
 }
@@ -95,7 +93,9 @@ impl<T, const N: usize> Ring<T, N> {
         if h - t == N {
             return false; // full
         }
-        unsafe { *self.buf[h % N].get() = Some(val); }
+        unsafe {
+            *self.buf[h % N].get() = Some(val);
+        }
         self.head.store(h + 1, Ordering::Release);
         true
     }

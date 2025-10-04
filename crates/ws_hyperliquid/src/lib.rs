@@ -1,6 +1,6 @@
-use anyhow::{anyhow, Context, Result};
-use arrayvec::ArrayVec;
 use ahash::AHashMap;
+use anyhow::{Context, Result, anyhow};
+use arrayvec::ArrayVec;
 use engine_core::{EngineHandler, EngineLogger, HandlerEvent};
 use hdrhistogram::Histogram;
 use simd_json::prelude::{ValueAsContainer, ValueAsScalar};
@@ -31,8 +31,22 @@ impl Book {
             asks: AHashMap::with_capacity(cap),
         }
     }
-    #[inline] fn set_bid(&mut self, px: u64, qty: f64){ if qty==0.0{ self.bids.remove(&px);} else { self.bids.insert(px, qty);} }
-    #[inline] fn set_ask(&mut self, px: u64, qty: f64){ if qty==0.0{ self.asks.remove(&px);} else { self.asks.insert(px, qty);} }
+    #[inline]
+    fn set_bid(&mut self, px: u64, qty: f64) {
+        if qty == 0.0 {
+            self.bids.remove(&px);
+        } else {
+            self.bids.insert(px, qty);
+        }
+    }
+    #[inline]
+    fn set_ask(&mut self, px: u64, qty: f64) {
+        if qty == 0.0 {
+            self.asks.remove(&px);
+        } else {
+            self.asks.insert(px, qty);
+        }
+    }
 }
 
 #[inline]
@@ -61,10 +75,7 @@ fn parse_wsbook_owned(buf: &mut [u8]) -> Result<Option<BookUpdate>> {
         return Ok(None);
     };
 
-    let payload = root
-        .get("data")
-        .and_then(|d| d.as_object())
-        .unwrap_or(root);
+    let payload = root.get("data").and_then(|d| d.as_object()).unwrap_or(root);
 
     let levels = match payload.get("levels").and_then(|x| x.as_array()) {
         Some(lvls) => lvls,
@@ -84,14 +95,20 @@ fn parse_wsbook_owned(buf: &mut [u8]) -> Result<Option<BookUpdate>> {
 
     for e in bids_a.iter().take(MAX_LEVELS_PER_MSG) {
         if let Some(lvl) = e.as_object() {
-            if let (Some(px), Some(sz)) = (lvl.get("px").and_then(|x| x.as_str()), lvl.get("sz").and_then(|x| x.as_str())) {
+            if let (Some(px), Some(sz)) = (
+                lvl.get("px").and_then(|x| x.as_str()),
+                lvl.get("sz").and_then(|x| x.as_str()),
+            ) {
                 bids.push((px_to_ticks(px)?, sz_from_str(sz)?));
             }
         }
     }
     for e in asks_a.iter().take(MAX_LEVELS_PER_MSG) {
         if let Some(lvl) = e.as_object() {
-            if let (Some(px), Some(sz)) = (lvl.get("px").and_then(|x| x.as_str()), lvl.get("sz").and_then(|x| x.as_str())) {
+            if let (Some(px), Some(sz)) = (
+                lvl.get("px").and_then(|x| x.as_str()),
+                lvl.get("sz").and_then(|x| x.as_str()),
+            ) {
                 asks.push((px_to_ticks(px)?, sz_from_str(sz)?));
             }
         }
@@ -100,7 +117,7 @@ fn parse_wsbook_owned(buf: &mut [u8]) -> Result<Option<BookUpdate>> {
 }
 
 pub struct HyperHandler {
-    coin: String,                              // e.g. "BTC"
+    coin: String, // e.g. "BTC"
     ws: Option<WebSocket<MaybeTlsStream<TcpStream>>>,
     book: Book,
     rx_buf: Vec<u8>,
@@ -115,7 +132,7 @@ impl HyperHandler {
             coin,
             ws: None,
             book: Book::with_capacity(4096),
-            rx_buf: vec![0u8; 1<<16],
+            rx_buf: vec![0u8; 1 << 16],
             hist: Histogram::new(3).unwrap(),
             subscribed: false,
             got_initial: false,
@@ -127,7 +144,9 @@ impl HyperHandler {
     }
 
     fn ensure_ws(&mut self, log: &EngineLogger) -> Result<()> {
-        if self.ws.is_some() { return Ok(()); }
+        if self.ws.is_some() {
+            return Ok(());
+        }
 
         let url = self.ws_url();
         // explicit request with Origin tends to be robust
@@ -145,26 +164,23 @@ impl HyperHandler {
             builder = builder.header("Host", host.as_str());
         }
 
-        let req = builder
-            .body(())
-            .map_err(|e| anyhow!("{e}"))?;
+        let req = builder.body(()).map_err(|e| anyhow!("{e}"))?;
 
         let ws_cfg = WebSocketConfig {
-            max_message_size: Some(1<<22),
-            max_frame_size: Some(1<<22),
+            max_message_size: Some(1 << 22),
+            max_frame_size: Some(1 << 22),
             ..Default::default()
         };
-        let (ws, _resp) = connect_with_config(req, Some(ws_cfg), 0)
-            .map_err(|e| {
-                log.handler_event(
-                    "hyperliquid",
-                    &self.coin,
-                    HandlerEvent::Error {
-                        detail: format!("ws connect failure: {e}"),
-                    },
-                );
-                e
-            })?;
+        let (ws, _resp) = connect_with_config(req, Some(ws_cfg), 0).map_err(|e| {
+            log.handler_event(
+                "hyperliquid",
+                &self.coin,
+                HandlerEvent::Error {
+                    detail: format!("ws connect failure: {e}"),
+                },
+            );
+            e
+        })?;
         self.ws = Some(ws);
         self.subscribed = false;
         log.handler_event("hyperliquid", &self.coin, HandlerEvent::Connected);
@@ -172,7 +188,9 @@ impl HyperHandler {
     }
 
     fn subscribe_l2(&mut self, log: &EngineLogger) -> Result<()> {
-        if self.subscribed { return Ok(()); }
+        if self.subscribed {
+            return Ok(());
+        }
         let ws = self.ws.as_mut().ok_or_else(|| anyhow!("no ws"))?;
 
         // { "method": "subscribe", "subscription": { "type": "l2Book", "coin": "BTC" } }
@@ -189,8 +207,12 @@ impl HyperHandler {
 
     fn apply_book(&mut self, up: &BookUpdate) -> (usize, usize, bool) {
         // HL sends full snapshot-ish levels each push; treat as set operations
-        for (px, sz) in up.bids.iter() { self.book.set_bid(*px, *sz); }
-        for (px, sz) in up.asks.iter() { self.book.set_ask(*px, *sz); }
+        for (px, sz) in up.bids.iter() {
+            self.book.set_bid(*px, *sz);
+        }
+        for (px, sz) in up.asks.iter() {
+            self.book.set_ask(*px, *sz);
+        }
         let was_initial = !self.got_initial;
         if was_initial {
             self.got_initial = true;
@@ -211,17 +233,26 @@ impl EngineHandler for HyperHandler {
                 log.handler_event(
                     "hyperliquid",
                     &self.coin,
-                    HandlerEvent::Warning { detail: "ws closed by peer".into() },
+                    HandlerEvent::Warning {
+                        detail: "ws closed by peer".into(),
+                    },
                 );
-                self.ws = None; return Ok(None);
+                self.ws = None;
+                return Ok(None);
             }
-            Err(tungstenite::Error::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock
-                || e.kind() == std::io::ErrorKind::TimedOut => { return Ok(None); }
+            Err(tungstenite::Error::Io(e))
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                return Ok(None);
+            }
             Err(e) => {
                 log.handler_event(
                     "hyperliquid",
                     &self.coin,
-                    HandlerEvent::Error { detail: format!("ws read error: {e}") },
+                    HandlerEvent::Error {
+                        detail: format!("ws read error: {e}"),
+                    },
                 );
                 return Err(e.into());
             }
@@ -232,7 +263,10 @@ impl EngineHandler for HyperHandler {
                 let len = txt.len().min(self.rx_buf.len());
                 self.rx_buf[..len].copy_from_slice(&txt.as_bytes()[..len]);
                 // Only handle WsBook channel frames
-                if txt.contains(r#""channel":"l2Book""#) || txt.contains(r#""levels":"#) || txt.contains(r#""levels":[["#) {
+                if txt.contains(r#""channel":"l2Book""#)
+                    || txt.contains(r#""levels":"#)
+                    || txt.contains(r#""levels":[["#)
+                {
                     let t0 = Instant::now();
                     if let Some(up) = parse_wsbook_owned(&mut self.rx_buf[..len])? {
                         let (bids, asks, first) = self.apply_book(&up);

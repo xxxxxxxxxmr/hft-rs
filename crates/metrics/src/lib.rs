@@ -17,8 +17,10 @@ impl EngineMetrics {
     }
 
     pub fn summary(&self) -> (f64, f64) {
-        (self.hist.value_at_percentile(50.0) as f64,
-         self.hist.value_at_percentile(99.0) as f64)
+        (
+            self.hist.value_at_percentile(50.0) as f64,
+            self.hist.value_at_percentile(99.0) as f64,
+        )
     }
 
     pub fn print_summary(&self) {
