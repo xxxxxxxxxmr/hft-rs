@@ -57,7 +57,7 @@ fn px_to_ticks(s: &str) -> Result<u64> {
 }
 #[inline]
 fn sz_from_str(s: &str) -> Result<f64> {
-    Ok(lexical_core::parse(s.as_bytes()).map_err(|_| anyhow!("bad sz"))?)
+    lexical_core::parse(s.as_bytes()).map_err(|_| anyhow!("bad sz"))
 }
 
 /// Minimal decoded WsBook: { coin, levels: [ [ {px, sz, n}... ], [ ... ] ], time }
@@ -81,7 +81,7 @@ fn parse_wsbook_owned(buf: &mut [u8]) -> Result<Option<BookUpdate>> {
         Some(lvls) => lvls,
         None => return Ok(None),
     };
-    let bids_a = match levels.get(0).and_then(|x| x.as_array()) {
+    let bids_a = match levels.first().and_then(|x| x.as_array()) {
         Some(arr) => arr,
         None => return Ok(None),
     };

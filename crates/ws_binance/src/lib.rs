@@ -14,14 +14,17 @@ use tungstenite::protocol::WebSocketConfig;
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{Message, WebSocket};
 
+/// Type alias for WebSocket connection result to reduce type complexity
+type WebSocketConnectResult = (
+    WebSocket<MaybeTlsStream<TcpStream>>,
+    http::Response<Option<Vec<u8>>>,
+);
+
 fn ws_connect_follow_redirects(
     mut req: http::Request<()>,
     ws_cfg: WebSocketConfig,
     max_hops: usize,
-) -> Result<(
-    WebSocket<MaybeTlsStream<TcpStream>>,
-    http::Response<Option<Vec<u8>>>,
-)> {
+) -> Result<WebSocketConnectResult> {
     use http::StatusCode;
     use tungstenite::client::connect_with_config as ws_connect;
     use tungstenite::error::Error as WsError;
@@ -68,7 +71,7 @@ fn ws_connect_follow_redirects(
                         continue;
                     }
                 }
-                return Err(anyhow!("WS HTTP error: {}", status));
+                return Err(anyhow!("WS HTTP error: {status}"));
             }
             Err(e) => return Err(e.into()),
         }
@@ -225,7 +228,7 @@ impl BinanceHandler {
         // Single-stream WS (prod)
         // Examples: wss://stream.binance.com:9443/ws/btcusdt@depth@100ms
         let stream = format!("{}@depth@100ms", self.symbol.to_lowercase());
-        format!("wss://stream.binance.com:9443/ws/{}", stream)
+        format!("wss://stream.binance.com:9443/ws/{stream}")
     }
 
     fn snapshot_url(&self) -> String {
@@ -246,7 +249,7 @@ impl BinanceHandler {
         let req = url.clone().into_client_request()?;
 
         // Optional: add Origin header up-front (helps with some CF edges)
-        let req = http::Request::from(req);
+        let req = req;
         let mut builder = http::Request::builder()
             .method("GET")
             .uri(req.uri().clone())
@@ -358,7 +361,7 @@ impl BinanceHandler {
             if d.final_id < self.last_update_id + 1 {
                 return Ok(());
             }
-            if d.first_id <= self.last_update_id + 1 && self.last_update_id + 1 <= d.final_id {
+            if d.first_id <= self.last_update_id + 1 && self.last_update_id < d.final_id {
                 self.synced = true;
                 log.handler_event("binance", &self.symbol, HandlerEvent::Synchronized);
             } else {

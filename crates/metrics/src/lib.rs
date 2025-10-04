@@ -5,6 +5,12 @@ pub struct EngineMetrics {
     hist: Histogram<u64>,
 }
 
+impl Default for EngineMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EngineMetrics {
     pub fn new() -> Self {
         Self {
@@ -25,6 +31,6 @@ impl EngineMetrics {
 
     pub fn print_summary(&self) {
         let (p50, p99) = self.summary();
-        println!("[metrics] p50={:.1}us p99={:.1}us", p50, p99);
+        println!("[metrics] p50={p50:.1}us p99={p99:.1}us");
     }
 }

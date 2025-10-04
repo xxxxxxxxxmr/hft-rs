@@ -85,7 +85,7 @@ pub struct Logger<const N: usize> {
 impl<const N: usize> Logger<N> {
     pub fn emit(&self, kind: LogEventKind) {
         if !self.tx.push(LogEvent::new(kind.clone())) {
-            eprintln!("[log drop] {:?}", kind);
+            eprintln!("[log drop] {kind:?}");
         }
     }
 

@@ -55,6 +55,11 @@ impl<T, const N: usize> Producer<T, N> {
     pub fn len(&self) -> usize {
         self.ring.len()
     }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.ring.is_empty()
+    }
 }
 
 impl<T, const N: usize> Consumer<T, N> {
@@ -71,6 +76,11 @@ impl<T, const N: usize> Consumer<T, N> {
     #[inline]
     pub fn len(&self) -> usize {
         self.ring.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.ring.is_empty()
     }
 }
 
@@ -116,5 +126,18 @@ impl<T, const N: usize> Ring<T, N> {
         let h = self.head.load(Ordering::Acquire);
         let t = self.tail.load(Ordering::Acquire);
         h - t
+    }
+
+    #[inline]
+    fn is_empty(&self) -> bool {
+        let h = self.head.load(Ordering::Acquire);
+        let t = self.tail.load(Ordering::Acquire);
+        h == t
+    }
+}
+
+impl<T, const N: usize> Default for Ring<T, N> {
+    fn default() -> Self {
+        Self::new()
     }
 }
